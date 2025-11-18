@@ -16,7 +16,7 @@ const { checkDateNotifications } = require("./Controller/DataLogic");
 const app = express();
 const port = 4000;
 
-// Create HTTP server and attach 
+// Create HTTP server and attach Socket.IO
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
