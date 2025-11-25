@@ -4,7 +4,7 @@ const User = require("../Schema/Model");
 const Notification = require("../Schema/NotificationSchema");
 const XLSX = require("xlsx");
 const Attendance = require("../Schema/AttendanceSchema");
-
+const { validatePhoneNumber } = require("../utils/phoneValidation");
 
 // Helper function to create a notification
 const createNotification = async (req, userId, message, entryId = null) => {
