@@ -143,6 +143,18 @@ const DataentryLogic = async (req, res) => {
         message: "Live Location is required",
       });
     }
+    // CHANGE: Prevent user from entering their own mobile number
+    if (mobileNumber) {
+      const user = await User.findById(req.user.id);
+      const phoneValidation = validatePhoneNumber(mobileNumber, user?.username);
+      if (!phoneValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          message: phoneValidation.message,
+        });
+      }
+    }
+
 
     // Parse products
     let parsedProducts = [];
@@ -495,7 +507,17 @@ const editEntry = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Entry not found" });
     }
-
+// CHANGE: Prevent user from entering their own mobile number
+    if (mobileNumber !== undefined) {
+      const user = await User.findById(req.user.id);
+      const phoneValidation = validatePhoneNumber(mobileNumber, user?.username);
+      if (!phoneValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          message: phoneValidation.message,
+        });
+      }
+    }
     let parsedProducts = [];
     if (products) {
       try {
@@ -853,6 +875,14 @@ const bulkUploadStocks = async (req, res) => {
         // Validate mobile number
         if (entry.mobileNumber && !/^\d{10}$/.test(entry.mobileNumber)) {
           throw new Error(`Invalid mobile number: ${entry.mobileNumber}`);
+        }
+        // CHANGE: Prevent user from entering their own mobile number
+        if (entry.mobileNumber) {
+          const user = await User.findById(req.user.id);
+          const phoneValidation = validatePhoneNumber(entry.mobileNumber, user?.username);
+          if (!phoneValidation.isValid) {
+            throw new Error(phoneValidation.message);
+          }
         }
 
         // Validate products
