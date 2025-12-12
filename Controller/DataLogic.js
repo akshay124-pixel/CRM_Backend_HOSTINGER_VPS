@@ -6,7 +6,7 @@ const XLSX = require("xlsx");
 const Attendance = require("../Schema/AttendanceSchema");
 const { validatePhoneNumber } = require("../utils/phoneValidation");
 
-// Helper function to create a notification
+// Helper function to create a notification check
 const createNotification = async (req, userId, message, entryId = null) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(userId)) {
