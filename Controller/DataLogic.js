@@ -1065,6 +1065,14 @@ const bulkUploadStocks = async (req, res) => {
 };
 
 
+const formatDateDDMMYYYY = (date) => {
+  if (!date) return "";
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-GB"); // dd/mm/yyyy
+};
+
+
 // Export Entries
 const exportentry = async (req, res) => {
   try {
@@ -1239,15 +1247,14 @@ if (filters.fromDate && filters.toDate) {
         entry.estimatedValue || "",
         entry.closeamount || "",
         entry.status || "Not Found",
-        entry.closetype || "Not Set",
-        entry.firstdate ? new Date(entry.firstdate).toLocaleDateString() : "",
-        entry.followUpDate ? new Date(entry.followUpDate).toLocaleDateString() : "",
-        entry.expectedClosingDate ? new Date(entry.expectedClosingDate).toLocaleDateString() : "",
+        entry.closetype || "Not Avilable",
+       formatDateDDMMYYYY(entry.firstdate),
+        formatDateDDMMYYYY(entry.followUpDate),
+        formatDateDDMMYYYY(entry.expectedClosingDate),
         entry.nextAction || "",
         entry.remarks || "",
-        entry.createdAt ? new Date(entry.createdAt).toLocaleDateString() : "",
-        entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : "",
-        entry.createdBy?.username || "Unknown",
+        formatDateDDMMYYYY(entry.createdAt),
+        formatDateDDMMYYYY(entry.updatedAt),
         Array.isArray(entry.assignedTo) ? entry.assignedTo.map((user) => user.username).join(", ") : (entry.assignedTo?.username || "Unassigned"),
         entry.attachmentpath ? "Yes" : "",
         "", 
@@ -1281,7 +1288,7 @@ if (filters.fromDate && filters.toDate) {
           "", // Created By (22)
           "", // Assigned To (23)
           hist.attachmentpath ? "Yes" : "", // Attachment (24)
-          hist.timestamp ? new Date(hist.timestamp).toLocaleDateString() : "", // History Date (25)
+          formatDateDDMMYYYY(hist.timestamp),
           hist.firstPersonMeet || "", // First Person Meet (26)
           hist.secondPersonMeet || "", // Second (27)
           hist.thirdPersonMeet || "", // Third (28)
