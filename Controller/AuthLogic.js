@@ -1,7 +1,7 @@
 const User = require("../Schema/Model");
 const bcrypt = require("bcrypt");
 const { generateToken } = require("../utils/config jwt");
-// Check CID
+
 const ChangePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword, email } = req.body;
