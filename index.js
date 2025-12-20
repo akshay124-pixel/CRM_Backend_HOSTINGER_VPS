@@ -1,4 +1,4 @@
-require("dotenv").config();
+require('dotenv').config({ path: '/www/wwwroot/CRM-Server/.env' });
 const express = require("express");
 const dbconnect = require("./utils/db.connect");
 const cors = require("cors");
@@ -15,12 +15,13 @@ const { checkDateNotifications } = require("./Controller/DataLogic");
 
 const app = express();
 const port = 4000;
+const allowedOrigins = process.env.API_URL.split(",");
 
 // Create HTTP server and attach Socket.IO 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: `${process.env.API_URL}`,
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -29,7 +30,7 @@ const io = new Server(server, {
 
 // CORS options
 const corsOptions = {
-  origin: `${process.env.API_URL}`,
+  origin: allowedOrigins,
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
   credentials: true,
 };

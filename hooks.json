@@ -1,0 +1,7 @@
+[
+  {
+    "id": "deploy-crm",
+    "execute-command": "/www/wwwroot/CRM-Server/deploy.sh",
+    "response-message": "CRM Deploy Started Successfully!"
+  }
+]
