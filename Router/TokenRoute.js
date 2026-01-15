@@ -8,8 +8,8 @@ const logger = require("../utils/logger");
 // COOKIE OPTIONS
 const cookieOptions = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === "production", // Secure in production
-  sameSite: process.env.NODE_ENV === "production" ? "Strict" : "Lax", // Strict for high security
+  secure: true, // Required for SameSite=None
+  sameSite: "None", // Required for cross-site (Vercel -> Hostinger)
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 Days
 };
 
