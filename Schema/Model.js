@@ -29,6 +29,7 @@ const userSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  refreshTokens: [String], // Whitelist of valid refresh tokens
 });
 
 module.exports = mongoose.model("User", userSchema);

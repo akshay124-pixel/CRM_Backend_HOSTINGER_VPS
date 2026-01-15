@@ -37,7 +37,7 @@ const historySchema = new mongoose.Schema({
 const entrySchema = new mongoose.Schema(
   {
     customerName: { type: String, trim: true },
-     customerEmail:{type:String , trim: true  },
+    customerEmail: { type: String, trim: true },
     mobileNumber: {
       type: String,
       match: [/^\d{10}$/, "Mobile number must be 10 digits"],
@@ -60,7 +60,7 @@ const entrySchema = new mongoose.Schema(
       enum: ["Not Found", "Maybe", "Interested", "Not Interested", "Closed"],
     },
     expectedClosingDate: { type: Date },
-   attachmentpath: { type: String, trim: true },
+    attachmentpath: { type: String, trim: true },
     closeamount: { type: Number, min: 0 },
     followUpDate: { type: Date },
     remarks: { type: String, trim: true },

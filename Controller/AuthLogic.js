@@ -1,6 +1,8 @@
 const User = require("../Schema/Model");
-const bcrypt = require("bcrypt"); 
-const { generateToken } = require("../utils/config jwt");
+const bcrypt = require("bcrypt");
+const { generateAccessToken, generateRefreshToken } = require("../utils/config jwt");
+const logger = require("../utils/logger");
+
 
 
 const ChangePassword = async (req, res) => {
@@ -8,7 +10,8 @@ const ChangePassword = async (req, res) => {
     const { currentPassword, newPassword, email } = req.body;
     const userId = req.user.id; // From JWT middleware
 
-    console.log("ChangePassword: Request received", { userId, email });
+    logger.debug("ChangePassword: Request received", { userId, email });
+
 
     if (!currentPassword || !newPassword || !email) {
       return res
@@ -37,7 +40,8 @@ const ChangePassword = async (req, res) => {
 
     const user = await User.findById(userId);
     if (!user) {
-      console.log("ChangePassword: User not found", { userId });
+      logger.warn("ChangePassword: User not found", { userId });
+
       return res
         .status(404)
         .json({ success: false, message: "User not found" });
@@ -45,10 +49,11 @@ const ChangePassword = async (req, res) => {
 
     // Verify email matches the authenticated user
     if (user.email !== email) {
-      console.log("ChangePassword: Email mismatch", {
+      logger.warn("ChangePassword: Email mismatch", {
         providedEmail: email,
         userEmail: user.email,
       });
+
       return res.status(403).json({
         success: false,
         message: "Email does not match authenticated user",
@@ -57,9 +62,10 @@ const ChangePassword = async (req, res) => {
 
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      console.log("ChangePassword: Current password incorrect for user", {
+      logger.warn("ChangePassword: Current password incorrect for user", {
         userId,
       });
+
       return res
         .status(401)
         .json({ success: false, message: "Current password is incorrect" });
@@ -70,9 +76,10 @@ const ChangePassword = async (req, res) => {
     user.lastPasswordChange = new Date(); // Track password change timestamp
     await user.save();
 
-    console.log("ChangePassword: Password changed successfully for user", {
+    logger.info("ChangePassword: Password changed successfully for user", {
       userId,
     });
+
 
     // Emit Socket.IO event for audit logging
     const io = req.app.get("io");
@@ -89,7 +96,8 @@ const ChangePassword = async (req, res) => {
       message: "Password changed successfully",
     });
   } catch (error) {
-    console.error("Change Password Error:", error);
+    logger.error("Change Password Error:", error);
+
     return res.status(500).json({
       success: false,
       message: "An error occurred while changing password",
@@ -137,7 +145,19 @@ const Signup = async (req, res) => {
 
     await newUser.save();
 
-    const token = generateToken(newUser);
+    const accessToken = generateAccessToken(newUser);
+    const refreshToken = generateRefreshToken(newUser);
+
+    newUser.refreshTokens.push(refreshToken);
+    await newUser.save();
+
+    // Set Cookie
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "Strict" : "Lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
 
     res.status(201).json({
       success: true,
@@ -149,10 +169,11 @@ const Signup = async (req, res) => {
         role: newUser.role,
         assignedAdmin: newUser.assignedAdmin,
       },
-      token,
+      accessToken,
     });
   } catch (error) {
-    console.error("Signup Error:", error);
+    logger.error("Signup Error:", error);
+
     return res.status(500).json({
       success: false,
       message:
@@ -189,7 +210,21 @@ const Login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user);
+    // Generate Tokens
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
+
+    // Store Refresh Token in DB
+    user.refreshTokens.push(refreshToken);
+    await user.save();
+
+    // Set Cookie
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "Strict" : "Lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 Days
+    });
 
     res.status(200).json({
       success: true,
@@ -201,10 +236,11 @@ const Login = async (req, res) => {
         role: user.role,
         assignedAdmin: user.assignedAdmin,
       },
-      token,
+      accessToken, // Frontend stores this in memory
     });
   } catch (error) {
-    console.error("Login Error:", error);
+    logger.error("Login Error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Something went wrong while logging in. Please try again later.",

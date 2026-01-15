@@ -1,4 +1,6 @@
 const express = require("express");
+const logger = require("../utils/logger");
+
 const router = express.Router();
 const multer = require("multer");
 const path = require("path");
@@ -13,6 +15,8 @@ const {
   fetchAllUsers,
   DataentryLogic,
   fetchEntries,
+  analyticsOverview,
+  analyticsUserMetrics,
   fetchTeam,
   DeleteData,
   editEntry,
@@ -121,6 +125,8 @@ router.post("/leave", verifyToken, markLeave);
 router.get("/allusers", verifyToken, fetchAllUsers);
 router.post("/entry", verifyToken, upload.single("attachment"), DataentryLogic);
 router.get("/fetch-entry", verifyToken, fetchEntries);
+router.get("/analytics/overview", verifyToken, analyticsOverview);
+router.get("/analytics/user-metrics", verifyToken, analyticsUserMetrics);
 router.get("/fetch-team", verifyToken, fetchTeam);
 router.delete("/entry/:id", verifyToken, DeleteData);
 router.put("/editentry/:id", verifyToken, upload.single("attachment"), editEntry);
@@ -150,7 +156,8 @@ router.get("/download/:filename", verifyToken, (req, res) => {
 
     const uploadsDir = path.join(__dirname, "../Uploads");
     const exactPath = path.join(uploadsDir, decoded);
-    console.log("Attempting to download file:", exactPath);
+    logger.info("Attempting to download file:", exactPath);
+
 
     let resolvedPath = null;
 
@@ -166,12 +173,14 @@ router.get("/download/:filename", verifyToken, (req, res) => {
           resolvedPath = path.join(uploadsDir, match);
         }
       } catch (dirErr) {
-        console.error("Error reading uploads directory:", dirErr);
+        logger.error("Error reading uploads directory:", dirErr);
+
       }
     }
 
     if (!resolvedPath || !fs.existsSync(resolvedPath)) {
-      console.log("File not found:", decoded);
+      logger.info("File not found:", decoded);
+
       return res
         .status(404)
         .json({ success: false, message: `File '${decoded}' not found` });
@@ -187,12 +196,14 @@ router.get("/download/:filename", verifyToken, (req, res) => {
 
     const fileStream = fs.createReadStream(resolvedPath);
     fileStream.on("error", (err) => {
-      console.error("Stream error:", err);
+      logger.error("Stream error:", err);
+
       res.status(500).json({ success: false, message: "Error streaming file" });
     });
     fileStream.pipe(res);
   } catch (err) {
-    console.error("Download route error:", err);
+    logger.error("Download route error:", err);
+
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

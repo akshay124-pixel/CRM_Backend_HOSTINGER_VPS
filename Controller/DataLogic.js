@@ -1,4 +1,6 @@
 const mongoose = require("mongoose");
+const logger = require("../utils/logger");
+
 const Entry = require("../Schema/DataModel");
 const User = require("../Schema/Model");
 const Notification = require("../Schema/NotificationSchema");
@@ -10,13 +12,15 @@ const { validatePhoneNumber } = require("../utils/phoneValidation");
 const createNotification = async (req, userId, message, entryId = null) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(userId)) {
-      console.error(`Invalid userId: ${userId}`);
+      logger.error(`Invalid userId: ${userId}`);
+
       return null;
     }
 
     const io = req.app.get("io");
     if (!io) {
-      console.error("Socket.IO instance not found");
+      logger.error("Socket.IO instance not found");
+
       return null;
     }
 
@@ -24,7 +28,7 @@ const createNotification = async (req, userId, message, entryId = null) => {
     if (entryId && mongoose.Types.ObjectId.isValid(entryId)) {
       validatedEntryId = new mongoose.Types.ObjectId(entryId);
     } else if (entryId) {
-    
+
     }
 
     const notification = new Notification({
@@ -36,7 +40,7 @@ const createNotification = async (req, userId, message, entryId = null) => {
     });
 
     await notification.save();
-    
+
 
     const notificationData = {
       ...notification.toObject(),
@@ -47,7 +51,8 @@ const createNotification = async (req, userId, message, entryId = null) => {
 
     return notificationData;
   } catch (error) {
-    console.error(`Error creating notification for user ${userId}:`, error);
+    logger.error(`Error creating notification for user ${userId}:`, error);
+
     return null;
   }
 };
@@ -101,7 +106,8 @@ const checkDateNotifications = async (io) => {
       }
     }
   } catch (error) {
-    console.error("Error in date-based notifications:", error);
+    logger.error("Error in date-based notifications:", error);
+
   }
 };
 
@@ -110,7 +116,7 @@ const DataentryLogic = async (req, res) => {
   try {
     const {
       customerName,
-       customerEmail,
+      customerEmail,
       mobileNumber,
       contactperson,
       firstdate,
@@ -203,8 +209,8 @@ const DataentryLogic = async (req, res) => {
     const assignedTo = Array.isArray(req.body.assignedTo)
       ? req.body.assignedTo
       : Object.keys(req.body)
-          .filter((key) => key.startsWith("assignedTo["))
-          .map((key) => req.body[key]);
+        .filter((key) => key.startsWith("assignedTo["))
+        .map((key) => req.body[key]);
     if (assignedTo && assignedTo.length > 0) {
       for (const userId of assignedTo) {
         if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -258,7 +264,7 @@ const DataentryLogic = async (req, res) => {
 
     const newEntry = new Entry({
       customerName: customerName?.trim(),
-      customerEmail:customerEmail?.trim(),
+      customerEmail: customerEmail?.trim(),
       mobileNumber: mobileNumber?.trim(),
       contactperson: contactperson?.trim(),
       firstdate: firstdate ? new Date(firstdate) : undefined,
@@ -305,13 +311,23 @@ const DataentryLogic = async (req, res) => {
       .populate("assignedTo", "username")
       .populate("history.assignedTo", "username");
 
+    try {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("entryCreated", populatedEntry);
+      }
+    } catch (emitErr) {
+      logger.error("Socket emit error (entryCreated):", emitErr.message);
+    }
+
     res.status(201).json({
       success: true,
       data: populatedEntry,
       message: "Entry created successfully",
     });
   } catch (error) {
-    console.error("Error in DataentryLogic:", error);
+    logger.error("Error in DataentryLogic:", error);
+
 
     let userMessage = "Something went wrong on our side. Please try again later.";
     if (error.name === "ValidationError") {
@@ -332,16 +348,33 @@ const DataentryLogic = async (req, res) => {
     });
   }
 };
-// Fetch Entries
+// Fetch Entries with Pagination and Filtering
 const fetchEntries = async (req, res) => {
   try {
-    let entries = [];
+    const {
+      page,
+      limit,
+      search,
+      fromDate,
+      toDate,
+      status,
+      username,
+      state,
+      city,
+      type, // Add type parameter
+    } = req.query;
+
+    const isPaginationEnabled = page && limit;
+    const pageNumber = parseInt(page) || 1;
+    const pageSize = parseInt(limit) || 10;
+    const skip = (pageNumber - 1) * pageSize;
+
+    // 1. Build Role-Based Base Query
+    let baseQuery = {};
+    const currentUserId = new mongoose.Types.ObjectId(req.user.id);
 
     if (req.user.role === "superadmin") {
-      entries = await Entry.find()
-        .populate("createdBy", "username role assignedAdmins")
-        .populate("assignedTo", "username role assignedAdmins")
-        .lean();
+      baseQuery = {}; // All entries
     } else if (req.user.role === "admin") {
       const teamMembers = await User.find({
         assignedAdmins: req.user.id,
@@ -361,27 +394,341 @@ const fetchEntries = async (req, res) => {
         ]),
       ];
 
-      entries = await Entry.find({
+      baseQuery = {
         $or: [
-          { createdBy: req.user.id },
+          { createdBy: currentUserId },
           { createdBy: { $in: teamMemberIds } },
-          { assignedTo: req.user.id },
+          { assignedTo: currentUserId },
           { assignedTo: { $in: teamMemberIds } },
         ],
-      })
-        .populate("createdBy", "username role assignedAdmins")
-        .populate("assignedTo", "username role assignedAdmins")
-        .lean();
+      };
     } else {
-      entries = await Entry.find({
-        $or: [{ createdBy: req.user.id }, { assignedTo: req.user.id }],
-      })
+      baseQuery = {
+        $or: [{ createdBy: currentUserId }, { assignedTo: currentUserId }],
+      };
+    }
+
+    // 2. Build Filter Query
+    const andConditions = [];
+
+    // Search
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+      andConditions.push({
+        $or: [
+          { customerName: searchRegex },
+          { address: searchRegex },
+          { mobileNumber: { $regex: searchRegex } },
+          { "products.name": searchRegex },
+        ],
+      });
+    }
+
+    // Date Range
+    if (fromDate && toDate) {
+      const start = new Date(fromDate);
+      const end = new Date(toDate);
+      andConditions.push({
+        $or: [
+          { createdAt: { $gte: start, $lte: end } },
+          { updatedAt: { $gte: start, $lte: end } },
+        ],
+      });
+    }
+
+    // Username
+    if (username) {
+      const user = await User.findOne({ username: username });
+      if (user) {
+        andConditions.push({
+          $or: [
+            { createdBy: user._id },
+            { assignedTo: user._id },
+          ],
+        });
+      } else {
+        andConditions.push({ _id: null }); // Force no match
+      }
+    }
+
+    // State & City
+    if (state) andConditions.push({ state: state });
+    if (city) andConditions.push({ city: city });
+
+    // Base Stats Query (Includes all filters EXCEPT Status)
+    const statsQuery = {
+      $and: [baseQuery, ...andConditions],
+    };
+
+    // Add Status to Data Query
+    const dataConditions = [...andConditions];
+    if (status && status !== "total") {
+      if (status === "Closed Won") {
+        dataConditions.push({ status: "Closed", closetype: "Closed Won" });
+      } else if (status === "Closed Lost") {
+        dataConditions.push({ status: "Closed", closetype: "Closed Lost" });
+      } else {
+        dataConditions.push({ status: status });
+      }
+    }
+
+    // Combine Queries for Data (includes status)
+    const finalQuery = {
+      $and: [baseQuery, ...dataConditions],
+    };
+
+    // 3. Handle analytics mode: return aggregated per-user metrics only
+    if (type === "analytics") {
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+      const hasDateRange = Boolean(fromDate && toDate);
+      const start = hasDateRange ? new Date(fromDate) : null;
+      const end = hasDateRange ? new Date(toDate) : null;
+
+      const matchStage = { $match: finalQuery };
+      const projectFields = {
+        createdBy: 1,
+        status: 1,
+        closetype: 1,
+        closeamount: { $ifNull: ["$closeamount", 0] },
+        estimatedValue: { $ifNull: ["$estimatedValue", 0] },
+        history: { $ifNull: ["$history", []] },
+        totalHistoryCount: { $size: { $ifNull: ["$history", []] } },
+      };
+
+      if (hasDateRange) {
+        projectFields.rangeHistoryCount = {
+          $size: {
+            $filter: {
+              input: "$history",
+              as: "h",
+              cond: {
+                $and: [
+                  { $gte: ["$$h.timestamp", start] },
+                  { $lte: ["$$h.timestamp", end] },
+                ],
+              },
+            },
+          },
+        };
+      } else {
+        projectFields.monthHistoryCount = {
+          $size: {
+            $filter: {
+              input: "$history",
+              as: "h",
+              cond: {
+                $and: [
+                  { $eq: [{ $month: "$$h.timestamp" }, currentMonth] },
+                  { $eq: [{ $year: "$$h.timestamp" }, currentYear] },
+                ],
+              },
+            },
+          },
+        };
+      }
+
+      const groupStage = {
+        $group: {
+          _id: "$createdBy",
+          allTimeEntries: { $sum: 1 },
+          totalVisits: {
+            $sum: hasDateRange ? "$rangeHistoryCount" : "$totalHistoryCount",
+          },
+          monthEntries: {
+            $sum: hasDateRange ? "$rangeHistoryCount" : "$monthHistoryCount",
+          },
+          cold: {
+            $sum: { $cond: [{ $eq: ["$status", "Not Interested"] }, 1, 0] },
+          },
+          warm: {
+            $sum: { $cond: [{ $eq: ["$status", "Maybe"] }, 1, 0] },
+          },
+          hot: {
+            $sum: { $cond: [{ $eq: ["$status", "Interested"] }, 1, 0] },
+          },
+          closedWon: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$status", "Closed"] },
+                    { $eq: ["$closetype", "Closed Won"] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          closedLost: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$status", "Closed"] },
+                    { $eq: ["$closetype", "Closed Lost"] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          totalClosingAmount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$status", "Closed"] },
+                    { $eq: ["$closetype", "Closed Won"] },
+                  ],
+                },
+                { $ifNull: ["$closeamount", 0] },
+                0,
+              ],
+            },
+          },
+          hotValue: {
+            $sum: {
+              $cond: [
+                { $eq: ["$status", "Interested"] },
+                { $ifNull: ["$estimatedValue", 0] },
+                0,
+              ],
+            },
+          },
+          warmValue: {
+            $sum: {
+              $cond: [
+                { $eq: ["$status", "Maybe"] },
+                { $ifNull: ["$estimatedValue", 0] },
+                0,
+              ],
+            },
+          },
+        },
+      };
+
+      const pipeline = [matchStage, { $project: projectFields }, groupStage];
+      const aggregated = await Entry.aggregate(pipeline);
+
+      return res.status(200).json(aggregated);
+    }
+
+    // 4. Fetch Data & Stats for normal mode
+    let entries = [];
+    let total = 0;
+    let stats = {
+      cold: 0,
+      warm: 0,
+      hot: 0,
+      closedWon: 0,
+      closedLost: 0,
+      totalVisits: 0,
+      monthlyVisits: 0,
+    };
+
+    if (isPaginationEnabled) {
+      // Parallel execution for data and stats
+      const [data, count, statsResult] = await Promise.all([
+        Entry.find(finalQuery)
+          .populate("createdBy", "username role assignedAdmins")
+          .populate("assignedTo", "username role assignedAdmins")
+          .sort({ updatedAt: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(pageSize)
+          .lean(),
+        Entry.countDocuments(finalQuery),
+        Entry.aggregate([
+          {
+            $facet: {
+              // Status Counts: Based on statsQuery (ignoring status filter)
+              statusCounts: [
+                { $match: statsQuery },
+                {
+                  $group: {
+                    _id: { status: "$status", closetype: "$closetype" },
+                    count: { $sum: 1 },
+                  },
+                },
+              ],
+              // History Stats: FIXED - Use statsQuery (not finalQuery) to get ALL visits regardless of status filter
+              historyStats: [
+                { $match: statsQuery },
+                { $unwind: "$history" },
+                {
+                  $project: {
+                    timestamp: "$history.timestamp",
+                  },
+                },
+              ],
+            },
+          },
+        ]),
+      ]);
+
+      entries = data;
+      total = count;
+
+      // Process Stats
+      if (statsResult && statsResult[0]) {
+        // Status Counts
+        statsResult[0].statusCounts.forEach((item) => {
+          const { status, closetype } = item._id;
+          const count = item.count;
+          if (status === "Not Interested") stats.cold += count;
+          else if (status === "Maybe") stats.warm += count;
+          else if (status === "Interested") stats.hot += count;
+          else if (status === "Closed") {
+            if (closetype === "Closed Won") stats.closedWon += count;
+            else if (closetype === "Closed Lost") stats.closedLost += count;
+          }
+        });
+
+        // Visit Counts - FIXED: Correct month comparison (getMonth returns 0-11, need to add 1)
+        const now = new Date();
+        const currentMonth = now.getMonth() + 1; // FIXED: Add 1 to match 1-12 range
+        const currentYear = now.getFullYear();
+        statsResult[0].historyStats.forEach((h) => {
+          const ts = new Date(h.timestamp);
+          stats.totalVisits++;
+
+          // Monthly Visits Logic - FIXED: Compare with 1-12 range
+          const tsMonth = ts.getMonth() + 1; // FIXED: Add 1 to match 1-12 range
+          const tsYear = ts.getFullYear();
+          if (tsMonth === currentMonth && tsYear === currentYear) {
+            stats.monthlyVisits++;
+          }
+        });
+      }
+
+    } else {
+      // Non-paginated (legacy support for drawers/exports)
+      entries = await Entry.find(finalQuery)
         .populate("createdBy", "username role assignedAdmins")
         .populate("assignedTo", "username role assignedAdmins")
+        .sort({ updatedAt: -1, createdAt: -1 })
         .lean();
     }
 
-    res.status(200).json(entries);
+    res.status(200).json(
+      isPaginationEnabled
+        ? {
+          success: true,
+          data: entries,
+          pagination: {
+            total,
+            page: pageNumber,
+            limit: pageSize,
+            pages: Math.ceil(total / pageSize),
+            hasMore: skip + entries.length < total,
+          },
+          stats,
+        }
+        : entries // Keep returning array for legacy calls if any
+    );
   } catch (error) {
     console.error("Error fetching entries:", error);
     res.status(500).json({
@@ -389,6 +736,284 @@ const fetchEntries = async (req, res) => {
       message: "Failed to fetch entries",
       error: error.message,
     });
+  }
+};
+
+const analyticsOverview = async (req, res) => {
+  try {
+    const { fromDate, toDate, search, username, state, city } = req.query;
+    let baseQuery = {};
+    const currentUserId = new mongoose.Types.ObjectId(req.user.id);
+    if (req.user.role === "superadmin") {
+      baseQuery = {};
+    } else if (req.user.role === "admin") {
+      const teamMembers = await User.find({ assignedAdmins: req.user.id }).select("_id role");
+      let teamMemberIds = teamMembers.map((m) => m._id);
+      const adminIds = teamMembers.filter((m) => m.role === "admin").map((a) => a._id);
+      const nestedMembers = await User.find({ assignedAdmins: { $in: adminIds } }).select("_id");
+      teamMemberIds = [...new Set([...teamMemberIds, ...nestedMembers.map((m) => m._id)])];
+      baseQuery = {
+        $or: [
+          { createdBy: currentUserId },
+          { createdBy: { $in: teamMemberIds } },
+          { assignedTo: currentUserId },
+          { assignedTo: { $in: teamMemberIds } },
+        ],
+      };
+    } else {
+      baseQuery = { $or: [{ createdBy: currentUserId }, { assignedTo: currentUserId }] };
+    }
+    const andConditions = [];
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+      andConditions.push({
+        $or: [
+          { customerName: searchRegex },
+          { address: searchRegex },
+          { mobileNumber: { $regex: searchRegex } },
+          { "products.name": searchRegex },
+        ],
+      });
+    }
+    if (fromDate && toDate) {
+      const start = new Date(fromDate);
+      const end = new Date(toDate);
+      andConditions.push({
+        $or: [{ createdAt: { $gte: start, $lte: end } }, { updatedAt: { $gte: start, $lte: end } }],
+      });
+    }
+    if (username) {
+      const user = await User.findOne({ username });
+      if (user) {
+        andConditions.push({ $or: [{ createdBy: user._id }, { assignedTo: user._id }] });
+      } else {
+        andConditions.push({ _id: null });
+      }
+    }
+    if (state) andConditions.push({ state });
+    if (city) andConditions.push({ city });
+    const finalQuery = { $and: [baseQuery, ...andConditions] };
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1; // FIXED: Add 1 to match 1-12 range
+    const currentYear = now.getFullYear();
+    const hasDateRange = Boolean(fromDate && toDate);
+    const start = hasDateRange ? new Date(fromDate) : null;
+    const end = hasDateRange ? new Date(toDate) : null;
+    const result = await Entry.aggregate([
+      { $match: finalQuery },
+      {
+        $facet: {
+          statusCounts: [
+            {
+              $group: {
+                _id: { status: "$status", closetype: "$closetype" },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          historyStats: [
+            { $unwind: "$history" },
+            {
+              $project: {
+                timestamp: "$history.timestamp",
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const stats = {
+      cold: 0,
+      warm: 0,
+      hot: 0,
+      closedWon: 0,
+      closedLost: 0,
+      totalVisits: 0,
+      monthlyVisits: 0,
+    };
+    if (result && result[0]) {
+      result[0].statusCounts.forEach((item) => {
+        const { status, closetype } = item._id;
+        const count = item.count;
+        if (status === "Not Interested") stats.cold += count;
+        else if (status === "Maybe") stats.warm += count;
+        else if (status === "Interested") stats.hot += count;
+        else if (status === "Closed") {
+          if (closetype === "Closed Won") stats.closedWon += count;
+          else if (closetype === "Closed Lost") stats.closedLost += count;
+        }
+      });
+      result[0].historyStats.forEach((h) => {
+        const ts = new Date(h.timestamp);
+        if (hasDateRange) {
+          if (ts >= start && ts <= end) {
+            stats.totalVisits++;
+            stats.monthlyVisits++;
+          }
+        } else {
+          stats.totalVisits++;
+          // FIXED: Correct month comparison (getMonth returns 0-11, need to add 1)
+          const tsMonth = ts.getMonth() + 1;
+          const tsYear = ts.getFullYear();
+          if (tsMonth === currentMonth && tsYear === currentYear) {
+            stats.monthlyVisits++;
+          }
+        }
+      });
+    }
+    res.status(200).json({ success: true, stats });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch overview analytics" });
+  }
+};
+
+const analyticsUserMetrics = async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.query;
+    let userIds = [];
+    const currentUserId = new mongoose.Types.ObjectId(req.user.id);
+    if (req.user.role === "superadmin") {
+      const users = await User.find({ role: { $in: ["admin", "others"] } }).select("_id");
+      userIds = users.map((u) => u._id);
+    } else if (req.user.role === "admin") {
+      const teamMembers = await User.find({ assignedAdmins: req.user.id }).select("_id role");
+      let teamMemberIds = teamMembers.map((m) => m._id);
+      const adminIds = teamMembers.filter((m) => m.role === "admin").map((a) => a._id);
+      const nestedMembers = await User.find({ assignedAdmins: { $in: adminIds } }).select("_id");
+      teamMemberIds = [...new Set([...teamMemberIds, ...nestedMembers.map((m) => m._id)])];
+      userIds = [...new Set([currentUserId, ...teamMemberIds])];
+    } else {
+      userIds = [currentUserId];
+    }
+    const matchDate = {};
+    if (fromDate && toDate) {
+      const start = new Date(fromDate);
+      const end = new Date(toDate);
+      matchDate.$or = [{ createdAt: { $gte: start, $lte: end } }, { updatedAt: { $gte: start, $lte: end } }];
+    }
+    const finalQuery = {
+      $and: [{ createdBy: { $in: userIds } }, ...(matchDate.$or ? [matchDate] : [])],
+    };
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    const hasDateRange = Boolean(fromDate && toDate);
+    const start = hasDateRange ? new Date(fromDate) : null;
+    const end = hasDateRange ? new Date(toDate) : null;
+    const agg = await Entry.aggregate([
+      { $match: finalQuery },
+      {
+        $facet: {
+          entryStats: [
+            {
+              $group: {
+                _id: "$createdBy",
+                allTimeEntries: { $sum: 1 },
+                cold: { $sum: { $cond: [{ $eq: ["$status", "Not Interested"] }, 1, 0] } },
+                warm: { $sum: { $cond: [{ $eq: ["$status", "Maybe"] }, 1, 0] } },
+                hot: { $sum: { $cond: [{ $eq: ["$status", "Interested"] }, 1, 0] } },
+                closedWon: {
+                  $sum: {
+                    $cond: [{ $and: [{ $eq: ["$status", "Closed"] }, { $eq: ["$closetype", "Closed Won"] }] }, 1, 0],
+                  },
+                },
+                closedLost: {
+                  $sum: {
+                    $cond: [{ $and: [{ $eq: ["$status", "Closed"] }, { $eq: ["$closetype", "Closed Lost"] }] }, 1, 0],
+                  },
+                },
+                totalClosingAmount: {
+                  $sum: {
+                    $cond: [
+                      { $and: [{ $eq: ["$status", "Closed"] }, { $eq: ["$closetype", "Closed Won"] }] },
+                      { $ifNull: ["$closeamount", 0] },
+                      0,
+                    ],
+                  },
+                },
+                hotValue: {
+                  $sum: {
+                    $cond: [{ $eq: ["$status", "Interested"] }, { $ifNull: ["$estimatedValue", 0] }, 0],
+                  },
+                },
+                warmValue: {
+                  $sum: {
+                    $cond: [{ $eq: ["$status", "Maybe"] }, { $ifNull: ["$estimatedValue", 0] }, 0],
+                  },
+                },
+              },
+            },
+          ],
+          historyStats: [
+            { $unwind: "$history" },
+            {
+              $group: {
+                _id: "$createdBy",
+                totalVisits: {
+                  $sum: 1,
+                },
+                monthlyVisits: {
+                  $sum: {
+                    $cond: [
+                      hasDateRange
+                        ? {
+                          $and: [
+                            { $gte: ["$history.timestamp", start] },
+                            { $lte: ["$history.timestamp", end] },
+                          ],
+                        }
+                        : {
+                          $and: [
+                            { $eq: [{ $month: "$history.timestamp" }, currentMonth + 1] },
+                            { $eq: [{ $year: "$history.timestamp" }, currentYear] },
+                          ],
+                        },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const entryMap = new Map();
+    (agg[0]?.entryStats || []).forEach((e) => {
+      entryMap.set(String(e._id), e);
+    });
+    const historyMap = new Map();
+    (agg[0]?.historyStats || []).forEach((h) => {
+      historyMap.set(String(h._id), h);
+    });
+    const users = await User.find({ _id: { $in: userIds } }).select("_id username role assignedAdmins assignedAdmin");
+    const metrics = users.map((u) => {
+      const id = String(u._id);
+      const e = entryMap.get(id) || {};
+      const h = historyMap.get(id) || {};
+      return {
+        userId: id,
+        username: u.username || "",
+        role: typeof u.role === "string" ? u.role.toLowerCase() : "",
+        assignedAdmin: u.assignedAdmin || null,
+        assignedAdmins: Array.isArray(u.assignedAdmins) ? u.assignedAdmins : [],
+        allTimeEntries: e.allTimeEntries || 0,
+        monthEntries: h.monthlyVisits || 0,
+        totalVisits: h.totalVisits || 0,
+        cold: e.cold || 0,
+        warm: e.warm || 0,
+        hot: e.hot || 0,
+        closedWon: e.closedWon || 0,
+        closedLost: e.closedLost || 0,
+        totalClosingAmount: e.totalClosingAmount || 0,
+        hotValue: e.hotValue || 0,
+        warmValue: e.warmValue || 0,
+      };
+    });
+    res.status(200).json({ success: true, data: metrics });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch user metrics" });
   }
 };
 
@@ -448,6 +1073,14 @@ const DeleteData = async (req, res) => {
     }
 
     await Entry.findByIdAndDelete(req.params.id);
+    try {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("entryDeleted", { _id: entry._id });
+      }
+    } catch (emitErr) {
+      logger.error("Socket emit error (entryDeleted):", emitErr.message);
+    }
     res
       .status(200)
       .json({ success: true, message: "Entry deleted successfully" });
@@ -466,7 +1099,7 @@ const editEntry = async (req, res) => {
   try {
     const {
       customerName,
-       customerEmail,
+      customerEmail,
       mobileNumber,
       contactperson,
       firstdate,
@@ -492,7 +1125,7 @@ const editEntry = async (req, res) => {
       fourthPersonMeet,
       assignedTo,
       createdAt,
-      
+
     } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -507,7 +1140,7 @@ const editEntry = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Entry not found" });
     }
-// CHANGE: Prevent user from entering their own mobile number
+    // CHANGE: Prevent user from entering their own mobile number
     if (mobileNumber !== undefined) {
       const user = await User.findById(req.user.id);
       const phoneValidation = validatePhoneNumber(mobileNumber, user?.username);
@@ -530,7 +1163,8 @@ const editEntry = async (req, res) => {
           (p) => p.name && p.specification && p.size && p.quantity
         );
       } catch (error) {
-        console.error("Error parsing products:", error.message);
+        logger.error("Error parsing products:", error.message);
+
         return res.status(400).json({
           success: false,
           message: "Invalid products data format",
@@ -564,9 +1198,9 @@ const editEntry = async (req, res) => {
     let historyEntry = {};
     const newFollowUpDate = followUpDate ? new Date(followUpDate) : null;
     const oldFollowUpDate = entry.followUpDate ? new Date(entry.followUpDate) : null;
-    const followUpDateChanged = 
-      newFollowUpDate && oldFollowUpDate 
-        ? newFollowUpDate.getTime() !== oldFollowUpDate.getTime() 
+    const followUpDateChanged =
+      newFollowUpDate && oldFollowUpDate
+        ? newFollowUpDate.getTime() !== oldFollowUpDate.getTime()
         : newFollowUpDate !== oldFollowUpDate;
     let hasChanges = false;
 
@@ -591,7 +1225,7 @@ const editEntry = async (req, res) => {
         followUpDate: newFollowUpDate,
         timestamp: new Date(),
       };
-    } 
+    }
     // Check for remarks update
     else if (remarks !== undefined && remarks !== entry.remarks) {
       historyEntry = {
@@ -604,7 +1238,7 @@ const editEntry = async (req, res) => {
         followUpDate: newFollowUpDate,
         timestamp: new Date(),
       };
-    } 
+    }
     // Check for products update
     else if (
       parsedProducts.length > 0 &&
@@ -620,7 +1254,7 @@ const editEntry = async (req, res) => {
         followUpDate: newFollowUpDate,
         timestamp: new Date(),
       };
-    } 
+    }
     // Check for assignedTo update
     else if (assignedTo !== undefined && assignedToChanged) {
       historyEntry = {
@@ -633,7 +1267,7 @@ const editEntry = async (req, res) => {
         followUpDate: newFollowUpDate,
         timestamp: new Date(),
       };
-    } 
+    }
     // Check for followUpDate update
     else if (followUpDate !== undefined && followUpDateChanged) {
       historyEntry = {
@@ -711,8 +1345,7 @@ const editEntry = async (req, res) => {
             await createNotification(
               req,
               userId,
-              `Assigned to updated entry: ${
-                customerName || entry.customerName
+              `Assigned to updated entry: ${customerName || entry.customerName
               }`,
               entry._id
             );
@@ -787,7 +1420,7 @@ const editEntry = async (req, res) => {
     });
 
     const updatedEntry = await entry.save();
-     // Send general update notification if there were changes (history added)
+    // Send general update notification if there were changes (history added)
     if (hasChanges) {
       const updateMessage = `Entry "${customerName || entry.customerName}" has been updated.`;
       // Notify creator
@@ -804,13 +1437,23 @@ const editEntry = async (req, res) => {
       .populate("assignedTo", "username")
       .populate("history.assignedTo", "username");
 
+    try {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("entryUpdated", populatedEntry);
+      }
+    } catch (emitErr) {
+      logger.error("Socket emit error (entryUpdated):", emitErr.message);
+    }
+
     res.status(200).json({
       success: true,
       data: populatedEntry,
       message: "Entry updated successfully",
     });
   } catch (error) {
-    console.error("Error in editEntry:", error);
+    logger.error("Error in editEntry:", error);
+
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((err) => ({
         field: err.path,
@@ -838,10 +1481,11 @@ const bulkUploadStocks = async (req, res) => {
   try {
     // Check MongoDB connection
     if (mongoose.connection.readyState !== 1) {
-      console.error(
+      logger.error(
         "MongoDB not connected, state:",
         mongoose.connection.readyState
       );
+
       return res.status(500).json({
         success: false,
         message: "Database connection error",
@@ -849,7 +1493,8 @@ const bulkUploadStocks = async (req, res) => {
     }
 
     if (!req.user?.id) {
-      console.error("No authenticated user found");
+      logger.error("No authenticated user found");
+
       return res
         .status(401)
         .json({ success: false, message: "User not authenticated" });
@@ -867,10 +1512,11 @@ const bulkUploadStocks = async (req, res) => {
 
     for (const [index, entry] of newEntries.entries()) {
       try {
-        console.log(
+        logger.debug(
           `Processing entry ${index}:`,
           JSON.stringify(entry, null, 2)
         );
+
 
         // Validate mobile number
         if (entry.mobileNumber && !/^\d{10}$/.test(entry.mobileNumber)) {
@@ -888,11 +1534,11 @@ const bulkUploadStocks = async (req, res) => {
         // Validate products
         const products = Array.isArray(entry.products)
           ? entry.products.map((p) => ({
-              name: String(p.name || ""),
-              specification: String(p.specification || ""),
-              size: String(p.size || ""),
-              quantity: Number(p.quantity || 1),
-            }))
+            name: String(p.name || ""),
+            specification: String(p.specification || ""),
+            size: String(p.size || ""),
+            quantity: Number(p.quantity || 1),
+          }))
           : [];
 
         // Validate dates
@@ -927,7 +1573,7 @@ const bulkUploadStocks = async (req, res) => {
 
         const formattedEntry = {
           customerName: String(entry.customerName || ""),
-           customerEmail: String(entry.customerEmail || ""),
+          customerEmail: String(entry.customerEmail || ""),
           mobileNumber: String(entry.mobileNumber || ""),
           contactperson: String(entry.contactperson || ""),
           address: String(entry.address || ""),
@@ -976,10 +1622,11 @@ const bulkUploadStocks = async (req, res) => {
 
         entriesWithMetadata.push(formattedEntry);
       } catch (validationError) {
-        console.error(
+        logger.error(
           `Validation error for entry ${index}:`,
           validationError.message
         );
+
         errors.push({ entryIndex: index, error: validationError.message });
       }
     }
@@ -997,17 +1644,19 @@ const bulkUploadStocks = async (req, res) => {
 
     for (let i = 0; i < entriesWithMetadata.length; i += batchSize) {
       const batch = entriesWithMetadata.slice(i, i + batchSize);
-      console.log(`Inserting batch of ${batch.length} entries`);
+      logger.info(`Inserting batch of ${batch.length} entries`);
+
       try {
         const insertedEntries = await Entry.insertMany(batch, {
           ordered: false,
           rawResult: true,
         });
 
-        console.log(
+        logger.debug(
           "InsertMany result:",
           JSON.stringify(insertedEntries, null, 2)
         );
+
         insertedCount +=
           insertedEntries.insertedCount || insertedEntries.length || 0;
 
@@ -1029,10 +1678,11 @@ const bulkUploadStocks = async (req, res) => {
               );
             }
           } catch (notificationError) {
-            console.error(
+            logger.error(
               `Notification error for entry ${entry._id}:`,
               notificationError.message
             );
+
             errors.push({
               entry: entry._id,
               error: `Notification failed: ${notificationError.message}`,
@@ -1040,14 +1690,16 @@ const bulkUploadStocks = async (req, res) => {
           }
         }
       } catch (batchError) {
-        console.error(`Batch ${i / batchSize + 1} error:`, batchError.message);
+        logger.error(`Batch ${i / batchSize + 1} error:`, batchError.message);
+
         errors.push({ batch: i / batchSize + 1, error: batchError.message });
       }
     }
 
-    console.log(
+    logger.info(
       `Inserted ${insertedCount} of ${entriesWithMetadata.length} entries`
     );
+
     return res.status(201).json({
       success: insertedCount > 0,
       message: `Uploaded ${insertedCount} entries`,
@@ -1055,7 +1707,8 @@ const bulkUploadStocks = async (req, res) => {
       errors: errors.length ? errors : null,
     });
   } catch (error) {
-    console.error("Bulk upload error:", error.message, error.stack);
+    logger.error("Bulk upload error:", error.message, error.stack);
+
     return res.status(500).json({
       success: false,
       message: "Failed to process entries",
@@ -1082,7 +1735,7 @@ const exportentry = async (req, res) => {
     // Role-based restriction
     let roleCondition;
     if (req.user.role === "superadmin") {
-      roleCondition = {}; 
+      roleCondition = {};
     } else if (req.user.role === "admin") {
       const teamMembers = await User.find({
         assignedAdmins: req.user.id,
@@ -1113,7 +1766,7 @@ const exportentry = async (req, res) => {
       matchConditions.push({
         $or: [
           { customerName: { $regex: filters.search, $options: "i" } },
-           { customerEmail: { $regex: filters.search, $options: "i" } },
+          { customerEmail: { $regex: filters.search, $options: "i" } },
           { mobileNumber: { $regex: filters.search, $options: "i" } },
           { address: { $regex: filters.search, $options: "i" } },
           { products: { $elemMatch: { name: { $regex: filters.search, $options: "i" } } } },
@@ -1171,27 +1824,27 @@ const exportentry = async (req, res) => {
       matchConditions.push({ city: filters.city });
     }
 
-      
- // Date range filter
-if (filters.fromDate && filters.toDate) {
-  const fromUTC = new Date(filters.fromDate);
-  const toUTC = new Date(filters.toDate);
 
-  if (isNaN(fromUTC.getTime()) || isNaN(toUTC.getTime())) {
-    return res.status(400).json({ success: false, message: "Invalid date format" });
-  }
+    // Date range filter
+    if (filters.fromDate && filters.toDate) {
+      const fromUTC = new Date(filters.fromDate);
+      const toUTC = new Date(filters.toDate);
 
-  if (toUTC < fromUTC) {
-    return res.status(400).json({ success: false, message: "toDate cannot be before fromDate" });
-  }
+      if (isNaN(fromUTC.getTime()) || isNaN(toUTC.getTime())) {
+        return res.status(400).json({ success: false, message: "Invalid date format" });
+      }
 
-  matchConditions.push({
-    $or: [
-      { createdAt: { $gte: fromUTC, $lte: toUTC } },
-      { updatedAt: { $gte: fromUTC, $lte: toUTC } },
-    ],
-  });
-}
+      if (toUTC < fromUTC) {
+        return res.status(400).json({ success: false, message: "toDate cannot be before fromDate" });
+      }
+
+      matchConditions.push({
+        $or: [
+          { createdAt: { $gte: fromUTC, $lte: toUTC } },
+          { updatedAt: { $gte: fromUTC, $lte: toUTC } },
+        ],
+      });
+    }
 
 
 
@@ -1214,22 +1867,22 @@ if (filters.fromDate && filters.toDate) {
     // Flatten the data: main entry rows followed by history rows
     const exportData = [];
     const headers = [
-      "Section", "Customer","Customer Email", "Mobile Number", "Contact Person", "Address", "City", "State", 
-      "Organization", "Category", "Type", "Products", "Estimated Value", "Closing Amount", 
-      "Status", "Close Type", "First Meeting", "Follow Up", "Expected Closing Date", "Next Action", "Remarks", "Created", "Updated", "Created By", 
-      "Assigned To", "Attachment", "History Date",  "First Person Meet", 
-      "Second Person Meet", "Third Person Meet", "Fourth Person Meet"
+      "Section", "Customer_Name", "Customer_Email", "Mobile_Number", "Contact_Person", "Address", "City", "State",
+      "Organization", "Category", "Type", "Products", "Estimated_Value", "Close_Amount",
+      "Status", "Close_Type", "First_Meeting", "Follow_Up_Date", "Expected_Closing_Date", "Next_Action", "Remarks", "Created", "Updated", "Created By",
+      "Assigned_To", "Attachment", "History Date", "First_Person_Meet",
+      "Second_Person_Meet", "Third_Person_Meet", "Fourth_Person_Meet"
     ];
 
     // Add headers as first row
     exportData.push(headers);
 
     entries.forEach((entry, entryIndex) => {
-     
+
       const mainRow = [
         `Client Entry #${entryIndex + 1}`,
         entry.customerName || "N/A",
-         entry.customerEmail || "N/A",
+        entry.customerEmail || "N/A",
         entry.mobileNumber || "N/A",
         entry.contactperson || "N/A",
         entry.address || "N/A",
@@ -1248,16 +1901,17 @@ if (filters.fromDate && filters.toDate) {
         entry.closeamount || "",
         entry.status || "Not Found",
         entry.closetype || "Not Avilable",
-       formatDateDDMMYYYY(entry.firstdate),
+        formatDateDDMMYYYY(entry.firstdate),
         formatDateDDMMYYYY(entry.followUpDate),
         formatDateDDMMYYYY(entry.expectedClosingDate),
         entry.nextAction || "",
         entry.remarks || "",
         formatDateDDMMYYYY(entry.createdAt),
         formatDateDDMMYYYY(entry.updatedAt),
+        entry.createdBy?.username || "N/A",
         Array.isArray(entry.assignedTo) ? entry.assignedTo.map((user) => user.username).join(", ") : (entry.assignedTo?.username || "Unassigned"),
         entry.attachmentpath ? "Yes" : "",
-        "", 
+        "",
         entry.firstPersonMeet || "",
         entry.secondPersonMeet || "",
         entry.thirdPersonMeet || "",
@@ -1269,8 +1923,8 @@ if (filters.fromDate && filters.toDate) {
       const sortedHistory = entry.history ? [...entry.history].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)) : [];
       sortedHistory.forEach((hist, histIndex) => {
         const historyRow = [
-          `History #${histIndex + 1}`,"",
-          "", "", "", "", "", "","", // Empty for Customer to State (1-7)
+          `History #${histIndex + 1}`, "",
+          "", "", "", "", "", "", "", // Empty for Customer to State (1-7)
           "", "", // Organization, Category (8-9)
           entry.products
             ?.map(
@@ -1344,7 +1998,8 @@ if (filters.fromDate && filters.toDate) {
     );
     res.send(fileBuffer);
   } catch (error) {
-    console.error("Error exporting entries:", error);
+    logger.error("Error exporting entries:", error);
+
     res.status(500).json({
       success: false,
       message: "Error exporting entries",
@@ -1369,7 +2024,8 @@ const fetchAllUsers = async (req, res) => {
 
     res.status(200).json(users);
   } catch (error) {
-    console.error("Error fetching all users:", error);
+    logger.error("Error fetching all users:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -1403,7 +2059,8 @@ const getAdmin = async (req, res) => {
       userId: user._id.toString(),
     });
   } catch (error) {
-    console.error("Error fetching user:", error);
+    logger.error("Error fetching user:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -1450,7 +2107,8 @@ const fetchUsers = async (req, res) => {
 
     res.status(200).json(users);
   } catch (error) {
-    console.error("Error fetching users:", error);
+    logger.error("Error fetching users:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -1463,7 +2121,8 @@ const fetchUsers = async (req, res) => {
 // Fetch team
 const fetchTeam = async (req, res) => {
   try {
-    console.log("Fetching team for user:", req.user.id, "Role:", req.user.role);
+    logger.debug("Fetching team for user:", req.user.id, "Role:", req.user.role);
+
 
     let users = [];
 
@@ -1471,7 +2130,8 @@ const fetchTeam = async (req, res) => {
       users = await User.find({ _id: { $ne: req.user.id } })
         .select("_id username email role assignedAdmins")
         .lean();
-      console.log("Superadmin users fetched:", users.length);
+      logger.debug("Superadmin users fetched:", users.length);
+
     } else if (req.user.role === "admin") {
       const allAdmins = await User.find({ role: "admin" })
         .select("_id assignedAdmins")
@@ -1497,7 +2157,8 @@ const fetchTeam = async (req, res) => {
       })
         .select("_id username email role assignedAdmins")
         .lean();
-      console.log("Admin users fetched:", users.length);
+      logger.debug("Admin users fetched:", users.length);
+
     } else if (req.user.role === "others") {
       // Fetch assigned admins for "others" role users
       const currentUser = await User.findById(req.user.id)
@@ -1518,14 +2179,16 @@ const fetchTeam = async (req, res) => {
       } else {
         users = [currentUser]; // Show only themselves if no assigned admins
       }
-      console.log("Others users fetched:", users.length);
+      logger.debug("Others users fetched:", users.length);
     } else {
-      console.log("Unknown role, returning empty list");
+      logger.debug("Unknown role, returning empty list");
+
       return res.status(200).json([]);
     }
 
     if (!users.length) {
-      console.log("No users found, returning empty array");
+      logger.debug("No users found, returning empty array");
+
       return res.status(200).json([]);
     }
 
@@ -1537,7 +2200,7 @@ const fetchTeam = async (req, res) => {
           .filter((id) => mongoose.Types.ObjectId.isValid(id))
       ),
     ];
-    console.log("Admin IDs for mapping:", adminIds);
+    logger.debug("Admin IDs for mapping:", adminIds);
     const admins = await User.find({ _id: { $in: adminIds } })
       .select("_id username role")
       .lean();
@@ -1558,10 +2221,11 @@ const fetchTeam = async (req, res) => {
 
     users.sort((a, b) => a.username.localeCompare(b.username));
 
-    console.log("Final users sent to frontend:", users.length);
+    logger.debug("Final users sent to frontend:", users.length);
     res.status(200).json(users);
   } catch (error) {
-    console.error("Error fetching team:", error);
+    logger.error("Error fetching team:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -1580,7 +2244,8 @@ const getUsersForTagging = async (req, res) => {
 
     res.status(200).json(users);
   } catch (error) {
-    console.error("Error fetching users for tagging:", error);
+    logger.error("Error fetching users for tagging:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -1678,7 +2343,8 @@ const assignUser = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error assigning user:", error);
+    logger.error("Error assigning user:", error);
+
     res.status(500).json({
       success: false,
       message:
@@ -2509,10 +3175,10 @@ const exportAttendance = async (req, res) => {
     const getStatus = (date, record) => {
       const dayOfWeek = date.getDay();
       if (dayOfWeek === 0) {
-        return "WeekOff"; 
+        return "WeekOff";
       }
-      
-      
+
+
       if (record) {
         return record.status || "Present";
       }
@@ -2540,7 +3206,7 @@ const exportAttendance = async (req, res) => {
 
     // Build array of arrays for the sheet
     const aoa = [];
-    const numCols = dates.length + 1; 
+    const numCols = dates.length + 1;
 
     users.forEach((usr, userIndex) => {
       if (userIndex > 0) {
@@ -2553,10 +3219,10 @@ const exportAttendance = async (req, res) => {
       aoa.push(['Date', ...dates.map(d => dateToExcelSerial(d))]);
 
       // Day row
-      aoa.push(['Day', ...dates.map(d => 
-        d.toLocaleDateString("en-GB", { 
-          weekday: "short", 
-          timeZone: "Asia/Kolkata" 
+      aoa.push(['Day', ...dates.map(d =>
+        d.toLocaleDateString("en-GB", {
+          weekday: "short",
+          timeZone: "Asia/Kolkata"
         })
       )]);
 
@@ -2579,14 +3245,14 @@ const exportAttendance = async (req, res) => {
         const dateKey = date.toDateString();
         const record = attendanceByUser[userId]?.[dateKey];
         const checkInTime = record?.checkIn ? new Date(record.checkIn) : null;
-        return checkInTime 
-          ? checkInTime.toLocaleTimeString("en-US", { 
-              hour12: true, 
-              hour: "2-digit", 
-              minute: "2-digit", 
-              second: "2-digit",
-              timeZone: "Asia/Kolkata" 
-            })
+        return checkInTime
+          ? checkInTime.toLocaleTimeString("en-US", {
+            hour12: true,
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            timeZone: "Asia/Kolkata"
+          })
           : '';
       });
       aoa.push(['Check In Time', ...checkIns]);
@@ -2596,14 +3262,14 @@ const exportAttendance = async (req, res) => {
         const dateKey = date.toDateString();
         const record = attendanceByUser[userId]?.[dateKey];
         const checkOutTime = record?.checkOut ? new Date(record.checkOut) : null;
-        return checkOutTime 
-          ? checkOutTime.toLocaleTimeString("en-US", { 
-              hour12: true, 
-              hour: "2-digit", 
-              minute: "2-digit", 
-              second: "2-digit",
-              timeZone: "Asia/Kolkata" 
-            })
+        return checkOutTime
+          ? checkOutTime.toLocaleTimeString("en-US", {
+            hour12: true,
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            timeZone: "Asia/Kolkata"
+          })
           : '';
       });
       aoa.push(['Check Out Time', ...checkOuts]);
@@ -2629,7 +3295,7 @@ const exportAttendance = async (req, res) => {
     // Set column widths: wider for first column (employee names), narrower for days
     ws["!cols"] = [
       { wch: 20 },
-      ...Array(dates.length).fill({ wch: 12 }) 
+      ...Array(dates.length).fill({ wch: 12 })
     ];
 
     // Apply date format to the date row cells (for each user's block)
@@ -2778,6 +3444,8 @@ module.exports = {
   fetchAllUsers,
   DataentryLogic,
   fetchEntries,
+  analyticsOverview,
+  analyticsUserMetrics,
   DeleteData,
   editEntry,
   exportentry,
