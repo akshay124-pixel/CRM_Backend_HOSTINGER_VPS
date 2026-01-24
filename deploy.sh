@@ -6,7 +6,7 @@ cd /www/wwwroot/CRM-Server || exit 1
 
 echo "🧹 Cleaning local changes..."
 git reset --hard
-git clean -fd
+git clean -fd -e Uploads
 
 echo "⬇️ Pulling latest code..."
 git pull origin main
