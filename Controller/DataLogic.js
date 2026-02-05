@@ -1869,7 +1869,7 @@ const exportentry = async (req, res) => {
     const headers = [
       "Section", "Customer_Name", "Customer_Email", "Mobile_Number", "Contact_Person", "Address", "City", "State",
       "Organization", "Category", "Type", "Products", "Estimated_Value", "Close_Amount",
-      "Status", "Close_Type", "First_Meeting", "Follow_Up_Date", "Expected_Closing_Date", "Next_Action", "Remarks", "Created", "Updated", "Created By",
+      "Status", "Close_Type", "First_Meeting", "Follow_Up_Date", "Expected_Closing_Date", "Next_Action", "Remarks", "CreatedAt", "Updated", "Created By",
       "Assigned_To", "Attachment", "History Date", "First_Person_Meet",
       "Second_Person_Meet", "Third_Person_Meet", "Fourth_Person_Meet"
     ];
@@ -1900,7 +1900,7 @@ const exportentry = async (req, res) => {
         entry.estimatedValue || "",
         entry.closeamount || "",
         entry.status || "Not Found",
-        entry.closetype || "Not Avilable",
+        entry.closetype || "",
         formatDateDDMMYYYY(entry.firstdate),
         formatDateDDMMYYYY(entry.followUpDate),
         formatDateDDMMYYYY(entry.expectedClosingDate),
